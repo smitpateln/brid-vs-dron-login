@@ -3,76 +3,85 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>Model Page</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
-
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.2.3/css/bootstrap.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    
+    <script>
+        // Helper function for AJAX requests with CSRF token
+        async function postData(url, data) {
+            const csrf_token = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+            const response = await fetch(url, {
+                method: 'POST', 
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': csrf_token
+                },
+                body: JSON.stringify(data)
+            });
+            return response.json();
+        }
+    </script>
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
-        <div class="container">
-            <a class="navbar-brand" href="#">Model App</a>
-            <div class="collapse navbar-collapse">
-                <ul class="navbar-nav ms-auto">
-                    <li class="nav-item">
-                        <a class="nav-link" href="{{ url_for('logout') }}">Logout</a>
-                    </li>
-                </ul>
-            </div>
-        </div>
-    </nav>
-
     <div class="container mt-5">
-        <div class="row">
-            <div class="col-md-12">
+        <div class="row justify-content-center">
+            <div class="col-md-8">
                 <div class="card">
-                    <div class="card-header">
-                        <h3>Welcome, {{ username }}</h3>
+                    <div class="card-header text-center">
+                        <h2>ML Model Interface</h2>
                     </div>
                     <div class="card-body">
-                        <h4 class="mb-4">Model Prediction</h4>
-                        <div class="row">
-                            <div class="col-md-6">
-                                <div class="form-group">
-                                    <label for="inputData">Input Data</label>
-                                    <textarea id="inputData" class="form-control" rows="5" placeholder="Enter data in JSON format"></textarea>
-                                </div>
-                                <button id="predictBtn" class="btn btn-primary mt-3">Make Prediction</button>
+                        <div class="mb-4">
+                            <h4>Welcome, {{ username }}!</h4>
+                            <p>You're now authenticated and can use the model prediction API.</p>
+                        </div>
+                        
+                        <div class="mb-4">
+                            <h5>Model Input</h5>
+                            <div class="form-group">
+                                <textarea id="input-data" class="form-control" rows="5" placeholder="Enter your input data in JSON format..."></textarea>
                             </div>
-                            <div class="col-md-6">
-                                <div class="card">
-                                    <div class="card-header">Result</div>
-                                    <div class="card-body">
-                                        <pre id="result">No prediction yet</pre>
-                                    </div>
-                                </div>
+                            <button id="predict-btn" class="btn btn-primary mt-2">Get Prediction</button>
+                        </div>
+                        
+                        <div class="result-container">
+                            <h5>Result</h5>
+                            <div id="result" class="form-control" style="min-height: 100px; background-color: #f8f9fa;">
+                                Results will appear here...
                             </div>
+                        </div>
+                        
+                        <div class="mt-4 text-end">
+                            <a href="{{ url_for('logout') }}" class="btn btn-secondary">Logout</a>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
-
+    
     <script>
-        document.getElementById('predictBtn').addEventListener('click', async function() {
-            const inputData = document.getElementById('inputData').value;
+        document.getElementById('predict-btn').addEventListener('click', function() {
+            const inputData = document.getElementById('input-data').value;
             try {
-                const data = JSON.parse(inputData);
+                const jsonData = JSON.parse(inputData);
                 
-                const response = await fetch('/api/predict', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'x-access-token': '{{ session.token }}'
-                    },
-                    body: JSON.stringify({ data: data })
-                });
-                
-                const result = await response.json();
-                document.getElementById('result').textContent = JSON.stringify(result, null, 2);
-            } catch (error) {
-                document.getElementById('result').textContent = `Error: ${error.message}`;
+                // Use the CSRF-protected fetch method
+                postData('/api/predict', {data: jsonData})
+                    .then(data => {
+                        if (data.error) {
+                            document.getElementById('result').innerHTML = `Error: ${data.error}`;
+                        } else {
+                            document.getElementById('result').innerHTML = `Prediction: ${JSON.stringify(data.prediction, null, 2)}`;
+                        }
+                    })
+                    .catch(error => {
+                        document.getElementById('result').innerHTML = `Error: ${error.message}`;
+                    });
+            } catch (e) {
+                document.getElementById('result').innerHTML = 'Error: Invalid JSON input';
             }
         });
     </script>

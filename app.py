@@ -1,4 +1,3 @@
-# app.py
 import os
 import jwt
 import random
@@ -11,19 +10,34 @@ from functools import wraps
 from flask import Flask, request, jsonify, render_template, redirect, url_for, session
 from flask_pymongo import PyMongo
 from werkzeug.security import generate_password_hash, check_password_hash
+from flask_wtf.csrf import CSRFProtect
+
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'qwertyuiopasdfghjklzxcvbnm'  # Replace with a strong secret key
-app.config['MONGO_URI'] = 'mongodb+srv://22it113:smit@cluster0.4qp35.mongodb.net/auth_app?retryWrites=true&w=majority&appName=Cluster0'
-app.config['JWT_SECRET_KEY'] = 'qwertyuiopasdfghjklzxcvbnm'
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
+app.config['MONGO_URI'] = os.getenv('MONGO_URI')
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = 'smitpatel53751@gmail.com'  # Replace with your email
-app.config['MAIL_PASSWORD'] = 'fpaw decw yspa sifo'  
-app.config['MODEL_PATH'] = 'best_model'  # Replace with your model path
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
+app.config['MODEL_PATH'] = 'best_model'
 
+# Initialize CSRF protection
+csrf = CSRFProtect(app)
+
+# Add HTTPS enforcement
+@app.before_request
+def force_https():
+    # Check if we're already using HTTPS
+    if request.headers.get('X-Forwarded-Proto') == 'http':
+        url = request.url.replace('http://', 'https://', 1)
+        return redirect(url, code=301)
 # Initialize MongoDB
 mongo = PyMongo(app)
 
@@ -56,7 +70,7 @@ def token_required(f):
     return decorated
 
 # Email OTP function
-def send_otp_email(email, otp, is_registration=False):
+def send_otp_email(email, otp, is_registration=False, is_reset=False):
     msg = MIMEMultipart()
     msg['From'] = app.config['MAIL_USERNAME']
     msg['To'] = email
@@ -64,6 +78,9 @@ def send_otp_email(email, otp, is_registration=False):
     if is_registration:
         msg['Subject'] = 'Verify Your Email Registration'
         body = f'Your OTP for email verification is: {otp}\n\nPlease enter this code to complete your registration.'
+    elif is_reset:
+        msg['Subject'] = 'Reset Your Password'
+        body = f'Your OTP for password reset is: {otp}\n\nPlease enter this code to reset your password.'
     else:
         msg['Subject'] = 'Your OTP for Login'
         body = f'Your OTP for login is: {otp}'
@@ -81,7 +98,6 @@ def send_otp_email(email, otp, is_registration=False):
     except Exception as e:
         print(f"Error sending email: {e}")
         return False
-
 # Routes
 @app.route('/')
 def home():
@@ -184,27 +200,46 @@ def login():
         
         if not user:
             return render_template('login.html', error='Invalid email or password')
-            
-        if not user.get('email_verified', False):
-            return render_template('login.html', error='Email not verified. Please register again.')
         
-        if check_password_hash(user['password'], password):
-            # Generate JWT token
-            token = jwt.encode({
-                'email': user['email'],
-                'exp': datetime.now() + timedelta(hours=24)
-            }, app.config['JWT_SECRET_KEY'])
-            
-            # Store token in session
-            session['token'] = token
-            session['email'] = email
-            
-            return redirect(url_for('model_page'))
+        # Check if the stored hash begins with 'scrypt:' which indicates an unsupported hash type
+        if user['password'].startswith('scrypt:'):
+            # Option 1: Reset the password (safer but requires user action)
+            # Redirect to password reset flow
+            session['reset_email'] = email
+            return redirect(url_for('forgot_password', 
+                                   message="Your account needs a password update. Please reset your password."))
+
+            # Option 2: Bypass password check for migration (less secure, temporary fix)
+            # Instead of the code above, you could use this code to migrate the user:
+            # new_hash = generate_password_hash(password)
+            # mongo.db.users.update_one({'email': email}, {'$set': {'password': new_hash}})
+            # However, this assumes the user entered the correct password
+        else:
+            # Normal password check
+            try:
+                if check_password_hash(user['password'], password):
+                    # Generate JWT token
+                    token = jwt.encode({
+                        'email': user['email'],
+                        'exp': datetime.now() + timedelta(hours=24)
+                    }, app.config['JWT_SECRET_KEY'])
+                    
+                    # Store token in session
+                    session['token'] = token
+                    session['email'] = email
+                    
+                    return redirect(url_for('model_page'))
+            except ValueError as e:
+                print(f"Password verification error: {e}")
+                # If we hit an error with the password hash, guide the user to reset
+                session['reset_email'] = email
+                return redirect(url_for('forgot_password', 
+                               message="Your password needs to be updated for security reasons. Please reset it."))
         
+        # If we get here, password was wrong
         return render_template('login.html', error='Invalid email or password')
     
     return render_template('login.html', message=message)
-
 @app.route('/model-page')
 def model_page():
     if 'token' not in session:
@@ -352,6 +387,106 @@ def resend_verification_otp():
         return render_template('confirm_email.html', 
                               error='Failed to send new verification code', 
                               email=email)
+# Add these routes to the end of your file, before if __name__ == '__main__':
 
+@app.route('/forgot-password', methods=['GET', 'POST'])
+def forgot_password():
+    if request.method == 'POST':
+        email = request.form.get('email')
+        
+        # Check if user exists
+        user = mongo.db.users.find_one({'email': email})
+        
+        if not user:
+            return render_template('forgot_password.html', error='No account found with this email address')
+        
+        # Generate OTP
+        otp = str(random.randint(100000, 999999))
+        
+        # Store password reset data in session
+        session['reset_email'] = email
+        session['reset_otp'] = otp
+        session['reset_otp_expiry'] = (datetime.now() + timedelta(minutes=10)).timestamp()
+        
+        # Send OTP via email
+        if send_otp_email(email, otp, is_reset=True):
+            return redirect(url_for('reset_password'))
+        else:
+            return render_template('forgot_password.html', error='Failed to send reset code. Please try again.')
+    
+    return render_template('forgot_password.html')
+
+@app.route('/reset-password', methods=['GET', 'POST'])
+def reset_password():
+    if 'reset_email' not in session or 'reset_otp' not in session:
+        return redirect(url_for('forgot_password'))
+    
+    email = session.get('reset_email')
+    message = request.args.get('message', '')
+    
+    if request.method == 'POST':
+        user_otp = request.form.get('otp')
+        new_password = request.form.get('new_password')
+        confirm_password = request.form.get('confirm_password')
+        
+        if datetime.now().timestamp() > session.get('reset_otp_expiry', 0):
+            # Clear session data
+            for key in ['reset_email', 'reset_otp', 'reset_otp_expiry']:
+                session.pop(key, None)
+            return render_template('forgot_password.html', error='Reset code expired. Please request a new one.')
+        
+        if user_otp != session['reset_otp']:
+            return render_template('reset_password.html', email=email, error='Invalid reset code')
+        
+        if new_password != confirm_password:
+            return render_template('reset_password.html', email=email, error='Passwords do not match')
+        
+        # Validate password
+        if len(new_password) < 8:
+            return render_template('reset_password.html', email=email, error='Password must be at least 8 characters long')
+        
+        if not any(char.isupper() for char in new_password):
+            return render_template('reset_password.html', email=email, error='Password must contain at least one uppercase letter')
+            
+        if not any(char.isdigit() for char in new_password):
+            return render_template('reset_password.html', email=email, error='Password must contain at least one number')
+            
+        if not any(char in '!@#$%^&*()-_=+[]{}|;:,.<>?/~`' for char in new_password):
+            return render_template('reset_password.html', email=email, error='Password must contain at least one special character')
+        
+        # Update user's password
+        hashed_password = generate_password_hash(new_password)
+        mongo.db.users.update_one(
+            {'email': email}, 
+            {'$set': {'password': hashed_password}}
+        )
+        
+        # Clear reset session data
+        for key in ['reset_email', 'reset_otp', 'reset_otp_expiry']:
+            session.pop(key, None)
+        
+        return redirect(url_for('login', message='Password reset successful! Please login with your new password.'))
+    
+    return render_template('reset_password.html', email=email, message=message)
+
+@app.route('/resend-reset-otp')
+def resend_reset_otp():
+    if 'reset_email' not in session:
+        return redirect(url_for('forgot_password'))
+    
+    # Generate new OTP
+    otp = str(random.randint(100000, 999999))
+    
+    # Update session with new OTP
+    session['reset_otp'] = otp
+    session['reset_otp_expiry'] = (datetime.now() + timedelta(minutes=10)).timestamp()
+    
+    # Send OTP via email
+    if send_otp_email(session['reset_email'], otp, is_reset=True):
+        return redirect(url_for('reset_password', message='New reset code sent!'))
+    else:
+        return render_template('reset_password.html', 
+                             error='Failed to send new reset code', 
+                             email=session.get('reset_email'))
 if __name__ == '__main__':
     app.run(debug=True)
