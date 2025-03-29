@@ -269,6 +269,89 @@ def resend_registration_otp():
         return render_template('verify_registration_otp.html', 
                               error='Failed to send new OTP', 
                               email=session.get('reg_email'))
+# Add these routes after the existing routes
+
+@app.route('/verify-email', methods=['GET', 'POST'])
+def verify_email():
+    if request.method == 'POST':
+        email = request.form.get('email')
+        
+        # Check if user exists
+        user = mongo.db.users.find_one({'email': email})
+        
+        if not user:
+            return render_template('verify_email.html', error='Email not found in our records')
+            
+        if user.get('email_verified', False):
+            return redirect(url_for('login', message='Your email is already verified. Please login.'))
+        
+        # Generate OTP
+        otp = str(random.randint(100000, 999999))
+        
+        # Store email verification data in session
+        session['verify_email'] = email
+        session['verify_otp'] = otp
+        session['verify_otp_expiry'] = (datetime.now() + timedelta(minutes=10)).timestamp()
+        
+        # Send OTP via email
+        if send_otp_email(email, otp, is_registration=True):
+            return redirect(url_for('confirm_email'))
+        else:
+            return render_template('verify_email.html', error='Failed to send verification email')
+    
+    return render_template('verify_email.html')
+
+@app.route('/confirm-email', methods=['GET', 'POST'])
+def confirm_email():
+    if 'verify_email' not in session or 'verify_otp' not in session:
+        return redirect(url_for('verify_email'))
+    
+    email = session.get('verify_email')
+    
+    if request.method == 'POST':
+        user_otp = request.form.get('otp')
+        
+        if datetime.now().timestamp() > session.get('verify_otp_expiry', 0):
+            # Clear session data
+            for key in ['verify_email', 'verify_otp', 'verify_otp_expiry']:
+                session.pop(key, None)
+            return render_template('verify_email.html', error='OTP expired. Please try again.')
+        
+        if user_otp == session['verify_otp']:
+            # Update user's email verification status
+            mongo.db.users.update_one({'email': email}, {'$set': {'email_verified': True}})
+            
+            # Clear verification session data
+            for key in ['verify_email', 'verify_otp', 'verify_otp_expiry']:
+                session.pop(key, None)
+            
+            return redirect(url_for('login', message='Email verified successfully! You can now login.'))
+        
+        return render_template('confirm_email.html', error='Invalid OTP', email=email)
+    
+    return render_template('confirm_email.html', email=email)
+
+@app.route('/resend-verification-otp')
+def resend_verification_otp():
+    if 'verify_email' not in session:
+        return redirect(url_for('verify_email'))
+    
+    email = session.get('verify_email')
+    
+    # Generate new OTP
+    otp = str(random.randint(100000, 999999))
+    
+    # Update session with new OTP
+    session['verify_otp'] = otp
+    session['verify_otp_expiry'] = (datetime.now() + timedelta(minutes=10)).timestamp()
+    
+    # Send OTP via email
+    if send_otp_email(email, otp, is_registration=True):
+        return redirect(url_for('confirm_email', message='New verification code sent!'))
+    else:
+        return render_template('confirm_email.html', 
+                              error='Failed to send new verification code', 
+                              email=email)
 
 if __name__ == '__main__':
     app.run(debug=True)
