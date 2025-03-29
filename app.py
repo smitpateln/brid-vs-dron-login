@@ -56,13 +56,18 @@ def token_required(f):
     return decorated
 
 # Email OTP function
-def send_otp_email(email, otp):
+def send_otp_email(email, otp, is_registration=False):
     msg = MIMEMultipart()
     msg['From'] = app.config['MAIL_USERNAME']
     msg['To'] = email
-    msg['Subject'] = 'Your OTP for Login'
     
-    body = f'Your OTP for login is: {otp}'
+    if is_registration:
+        msg['Subject'] = 'Verify Your Email Registration'
+        body = f'Your OTP for email verification is: {otp}\n\nPlease enter this code to complete your registration.'
+    else:
+        msg['Subject'] = 'Your OTP for Login'
+        body = f'Your OTP for login is: {otp}'
+    
     msg.attach(MIMEText(body, 'plain'))
     
     try:
@@ -108,79 +113,97 @@ def register():
         if existing_user:
             return render_template('register.html', error='Email already registered')
         
-        # Create new user
-        hashed_password = generate_password_hash(password)
-        user_data = {
-            'username': username,
-            'email': email,
-            'password': hashed_password,
-            'created_at': datetime.now()
-        }
+        # Generate OTP
+        otp = str(random.randint(100000, 999999))
         
-        mongo.db.users.insert_one(user_data)
-        return redirect(url_for('login'))
+        # Store registration data and OTP in session
+        session['reg_username'] = username
+        session['reg_email'] = email
+        session['reg_password'] = password
+        session['reg_otp'] = otp
+        session['reg_otp_expiry'] = (datetime.now() + timedelta(minutes=10)).timestamp()
+        
+        # Send OTP via email
+        if send_otp_email(email, otp, is_registration=True):
+            return redirect(url_for('verify_registration_otp'))
+        else:
+            return render_template('register.html', error='Failed to send verification OTP')
     
     return render_template('register.html')
+
+@app.route('/verify-registration-otp', methods=['GET', 'POST'])
+def verify_registration_otp():
+    if 'reg_otp' not in session or 'reg_email' not in session:
+        return redirect(url_for('register'))
+    
+    if request.method == 'POST':
+        user_otp = request.form.get('otp')
+        
+        if datetime.now().timestamp() > session.get('reg_otp_expiry', 0):
+            # Clear session data
+            for key in ['reg_username', 'reg_email', 'reg_password', 'reg_otp', 'reg_otp_expiry']:
+                session.pop(key, None)
+            return render_template('register.html', error='OTP expired. Please register again.')
+        
+        if user_otp == session['reg_otp']:
+            # Create new user
+            username = session['reg_username']
+            email = session['reg_email']
+            password = session['reg_password']
+            
+            hashed_password = generate_password_hash(password)
+            user_data = {
+                'username': username,
+                'email': email,
+                'password': hashed_password,
+                'email_verified': True,
+                'created_at': datetime.now()
+            }
+            
+            mongo.db.users.insert_one(user_data)
+            
+            # Clear registration session data
+            for key in ['reg_username', 'reg_email', 'reg_password', 'reg_otp', 'reg_otp_expiry']:
+                session.pop(key, None)
+            
+            return redirect(url_for('login', message='Registration successful! Please login.'))
+        
+        return render_template('verify_registration_otp.html', error='Invalid OTP')
+    
+    return render_template('verify_registration_otp.html', email=session.get('reg_email'))
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    message = request.args.get('message', '')
+    
     if request.method == 'POST':
         email = request.form.get('email')
         password = request.form.get('password')
         
         user = mongo.db.users.find_one({'email': email})
         
-        if user and check_password_hash(user['password'], password):
-            # Generate OTP
-            otp = str(random.randint(100000, 999999))
+        if not user:
+            return render_template('login.html', error='Invalid email or password')
             
-            # Store OTP and expiry in session
-            session['otp'] = otp
-            session['otp_expiry'] = (datetime.now() + timedelta(minutes=10)).timestamp()
-            session['email'] = email
-            
-            # Send OTP via email
-            if send_otp_email(email, otp):
-                return redirect(url_for('verify_otp'))
-            else:
-                return render_template('login.html', error='Failed to send OTP')
+        if not user.get('email_verified', False):
+            return render_template('login.html', error='Email not verified. Please register again.')
         
-        return render_template('login.html', error='Invalid email or password')
-    
-    return render_template('login.html')
-
-@app.route('/verify-otp', methods=['GET', 'POST'])
-def verify_otp():
-    if 'otp' not in session or 'email' not in session:
-        return redirect(url_for('login'))
-    
-    if request.method == 'POST':
-        user_otp = request.form.get('otp')
-        
-        if datetime.now().timestamp() > session.get('otp_expiry', 0):
-            return render_template('verify_otp.html', error='OTP expired')
-        
-        if user_otp == session['otp']:
-            # Get user details
-            user = mongo.db.users.find_one({'email': session['email']})
-            
+        if check_password_hash(user['password'], password):
             # Generate JWT token
             token = jwt.encode({
                 'email': user['email'],
                 'exp': datetime.now() + timedelta(hours=24)
             }, app.config['JWT_SECRET_KEY'])
             
-            # Clear OTP session variables
-            session.pop('otp', None)
-            session.pop('otp_expiry', None)
-            
             # Store token in session
             session['token'] = token
+            session['email'] = email
             
             return redirect(url_for('model_page'))
         
-        return render_template('verify_otp.html', error='Invalid OTP')
+        return render_template('login.html', error='Invalid email or password')
     
-    return render_template('verify_otp.html')
+    return render_template('login.html', message=message)
 
 @app.route('/model-page')
 def model_page():
@@ -226,6 +249,26 @@ def predict(current_user):
         return jsonify({'prediction': result})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/resend-registration-otp')
+def resend_registration_otp():
+    if 'reg_email' not in session:
+        return redirect(url_for('register'))
+    
+    # Generate new OTP
+    otp = str(random.randint(100000, 999999))
+    
+    # Update session with new OTP
+    session['reg_otp'] = otp
+    session['reg_otp_expiry'] = (datetime.now() + timedelta(minutes=10)).timestamp()
+    
+    # Send OTP via email
+    if send_otp_email(session['reg_email'], otp, is_registration=True):
+        return redirect(url_for('verify_registration_otp', message='New OTP sent!'))
+    else:
+        return render_template('verify_registration_otp.html', 
+                              error='Failed to send new OTP', 
+                              email=session.get('reg_email'))
 
 if __name__ == '__main__':
     app.run(debug=True)
